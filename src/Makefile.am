@@ -376,10 +376,16 @@ crypto_libbitcoin_crypto_base_a_SOURCES = \
   crypto/common.h \
   crypto/hkdf_sha256_32.cpp \
   crypto/hkdf_sha256_32.h \
+  crypto/hmac_ripemd160.cpp \
+  crypto/hmac_ripemd160.h \
+  crypto/hmac_sha1.cpp \
+  crypto/hmac_sha1.h \
   crypto/hmac_sha256.cpp \
   crypto/hmac_sha256.h \
   crypto/hmac_sha512.cpp \
   crypto/hmac_sha512.h \
+  crypto/pbkdf2_hmac.cpp \
+  crypto/pbkdf2_hmac.h \
   crypto/poly1305.h \
   crypto/poly1305.cpp \
   crypto/ripemd160.cpp \
@@ -391,7 +397,48 @@ crypto_libbitcoin_crypto_base_a_SOURCES = \
   crypto/sha512.cpp \
   crypto/sha512.h \
   crypto/siphash.cpp \
-  crypto/siphash.h
+  crypto/siphash.h \
+## --- scrypt hash --- ##
+  crypto/scrypt.cpp \
+  crypto/scrypt-sse2.cpp \
+  crypto/scrypt.h \
+## --- xevan hash --- ##
+  crypto/blake.c \
+  crypto/sph_blake.h \
+  crypto/bmw.c \
+  crypto/sph_bmw.h \
+  crypto/groestl.c \
+  crypto/sph_groestl.h \
+  crypto/jh.c \
+  crypto/sph_jh.h \
+  crypto/keccak.c \
+  crypto/sph_keccak.h \
+  crypto/skein.c \
+  crypto/sph_skein.h \
+  crypto/luffa.c \
+  crypto/sph_luffa.h \
+  crypto/cubehash.c \
+  crypto/sph_cubehash.h \
+  crypto/shavite.c \
+  crypto/sph_shavite.h \
+  crypto/simd.c \
+  crypto/sph_simd.h \
+  crypto/echo.c \
+  crypto/sph_echo.h \
+  crypto/hamsi.c \
+  crypto/sph_hamsi.h \
+  crypto/fugue.c \
+  crypto/sph_fugue.h \
+  crypto/shabal.c \
+  crypto/sph_shabal.h \
+  crypto/whirlpool.c \
+  crypto/sph_whirlpool.h \
+  crypto/sha2.c \
+  crypto/sph_sha2big.c \
+  crypto/sph_sha2.h \
+  crypto/haval.c \
+  crypto/sph_haval.h \
+  crypto/sph_types.h
 
 if USE_ASM
 crypto_libbitcoin_crypto_base_a_SOURCES += crypto/sha256_sse4.cpp

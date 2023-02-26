@@ -19,7 +19,7 @@
  * Maximum amount of time that a block timestamp is allowed to exceed the
  * current network-adjusted time before the block will be accepted.
  */
-static constexpr int64_t MAX_FUTURE_BLOCK_TIME = 2 * 60 * 60;
+static constexpr int64_t MAX_FUTURE_BLOCK_TIME = 15; // FTL = 15 seconds (should be <= consensus.nStakeTimestampMask and <= 1/20 of the difficulty averaging window consensus.nPowTargetTimespan)
 
 /**
  * Timestamp window used as a grace period by code that compares external
@@ -254,7 +254,7 @@ public:
         return (int64_t)nTimeMax;
     }
 
-    static constexpr int nMedianTimeSpan = 11;
+    static constexpr int nMedianTimeSpan = 1;
 
     int64_t GetMedianTimePast() const
     {

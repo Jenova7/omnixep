@@ -377,7 +377,7 @@ static void UpdateMempoolForReorg(DisconnectedBlockTransactions& disconnectpool,
     while (it != disconnectpool.queuedTx.get<insertion_order>().rend()) {
         // ignore validation errors in resurrected transactions
         TxValidationState stateDummy;
-        if (!fAddToMempool || (*it)->IsCoinBase() ||
+        if (!fAddToMempool || (*it)->IsCoinBase() || (*it)->IsCoinStake() ||
             !AcceptToMemoryPool(mempool, stateDummy, *it,
                                 nullptr /* plTxnReplaced */, true /* bypass_limits */, 0 /* nAbsurdFee */)) {
             // If the transaction doesn't make it in to the mempool, remove any
@@ -413,7 +413,7 @@ static bool CheckInputsFromMempoolAndCache(const CTransaction& tx, TxValidationS
     // and when we actually call through to CheckInputScripts
     LOCK(pool.cs);
 
-    assert(!tx.IsCoinBase());
+    assert(!tx.IsCoinBase() && !tx.IsCoinStake());
     for (const CTxIn& txin : tx.vin) {
         const Coin& coin = view.AccessCoin(txin.prevout);
 
@@ -569,7 +569,7 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
         return false; // state filled in by CheckTransaction
 
     // Coinbase is only valid in a block, not as a loose transaction
-    if (tx.IsCoinBase())
+    if (tx.IsCoinBase() || tx.IsCoinStake())
         return state.Invalid(TxValidationResult::TX_CONSENSUS, "coinbase");
 
     // Rather not work on nonstandard transactions (unless -testnet/-regtest)
@@ -699,7 +699,7 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
     bool fSpendsCoinbase = false;
     for (const CTxIn &txin : tx.vin) {
         const Coin &coin = m_view.AccessCoin(txin.prevout);
-        if (coin.IsCoinBase()) {
+        if (coin.IsCoinBase() || coin.IsCoinStake()) {
             fSpendsCoinbase = true;
             break;
         }
@@ -1173,7 +1173,7 @@ bool ReadBlockFromDisk(CBlock& block, const FlatFilePos& pos, const Consensus::P
     }
 
     // Check the header
-    if (!CheckProofOfWork(block.GetHash(), block.nBits, consensusParams))
+    if (!CheckProofOfWork(block.GetPoWHash(), block.nBits, consensusParams))
         return error("ReadBlockFromDisk: Errors in block header at %s", pos.ToString());
 
     return true;
@@ -1683,7 +1683,8 @@ int ApplyTxInUndo(Coin&& undo, CCoinsViewCache& view, const COutPoint& out)
 
     if (view.HaveCoin(out)) fClean = false; // overwriting transaction output
 
-    if (undo.nHeight == 0) {
+    // We have to exclude the genesis coinbase from this check because its height actually is zero and the wallet will think there is database corruption otherwise
+    if (undo.nHeight == 0 && out.hash != Params().GenesisBlock().hashMerkleRoot) {
         // Missing undo metadata (height and coinbase). Older versions included this
         // information only in undo records for the last spend of a transactions'
         // outputs. This implies that it must be present for some other output of the same tx.
@@ -1691,6 +1692,7 @@ int ApplyTxInUndo(Coin&& undo, CCoinsViewCache& view, const COutPoint& out)
         if (!alternate.IsSpent()) {
             undo.nHeight = alternate.nHeight;
             undo.fCoinBase = alternate.fCoinBase;
+            undo.fCoinStake = alternate.fCoinStake; // peercoin
         } else {
             return DISCONNECT_FAILED; // adding output for transaction without known metadata
         }
@@ -1729,6 +1731,7 @@ DisconnectResult CChainState::DisconnectBlock(const CBlock& block, const CBlockI
         const CTransaction &tx = *(block.vtx[i]);
         uint256 hash = tx.GetHash();
         bool is_coinbase = tx.IsCoinBase();
+        bool is_coinstake = tx.IsCoinStake();
 
         // Check that all outputs are available and match the outputs in the block itself
         // exactly.
@@ -1737,7 +1740,7 @@ DisconnectResult CChainState::DisconnectBlock(const CBlock& block, const CBlockI
                 COutPoint out(hash, o);
                 Coin coin;
                 bool is_spent = view.SpendCoin(out, &coin);
-                if (!is_spent || tx.vout[o] != coin.out || pindex->nHeight != coin.nHeight || is_coinbase != coin.fCoinBase) {
+                if (!is_spent || tx.vout[o] != coin.out || pindex->nHeight != coin.nHeight || is_coinbase != coin.fCoinBase || is_coinstake != coin.fCoinStake) {
                     fClean = false; // transaction output mismatch
                 }
             }
@@ -1918,7 +1921,7 @@ static bool IsScriptWitnessEnabled(const Consensus::Params& params)
 static unsigned int GetBlockScriptFlags(const CBlockIndex* pindex, const Consensus::Params& consensusparams) EXCLUSIVE_LOCKS_REQUIRED(cs_main) {
     AssertLockHeld(cs_main);
 
-    unsigned int flags = SCRIPT_VERIFY_NONE;
+    unsigned int flags = MANDATORY_SCRIPT_VERIFY_FLAGS;
 
     // BIP16 didn't become active until Apr 1 2012 (on mainnet, and
     // retroactively applied to testnet)
@@ -1936,6 +1939,7 @@ static unsigned int GetBlockScriptFlags(const CBlockIndex* pindex, const Consens
     // deployment is defined).
     if (flags & SCRIPT_VERIFY_P2SH && IsScriptWitnessEnabled(consensusparams)) {
         flags |= SCRIPT_VERIFY_WITNESS;
+        flags |= SCRIPT_VERIFY_CLEANSTACK;
     }
 
     // Start enforcing the DERSIG (BIP66) rule
@@ -2014,11 +2018,11 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
 
     // Special case for the genesis block, skipping connection of its transactions
     // (its coinbase is unspendable)
-    if (block.GetHash() == chainparams.GetConsensus().hashGenesisBlock) {
+    /*if (block.GetHash() == chainparams.GetConsensus().hashGenesisBlock) {
         if (!fJustCheck)
             view.SetBestBlock(pindex->GetBlockHash());
         return true;
-    }
+    }*/
 
     bool fScriptChecks = true;
     if (!hashAssumeValid.IsNull()) {
@@ -2066,8 +2070,7 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
     // Now that the whole chain is irreversibly beyond that time it is applied to all blocks except the
     // two in the chain that violate it. This prevents exploiting the issue against nodes during their
     // initial block download.
-    bool fEnforceBIP30 = !((pindex->nHeight==91842 && pindex->GetBlockHash() == uint256S("0x00000000000a4d0a398161ffc163c503763b1f4360639393e0e4c8e300e0caec")) ||
-                           (pindex->nHeight==91880 && pindex->GetBlockHash() == uint256S("0x00000000000743f190a18c5577a3c2d2a1f610ae9601ac046a38084ccb7cd721")));
+    bool fEnforceBIP30 = true;
 
     // Once BIP34 activated it was not possible to create new duplicate coinbases and thus other than starting
     // with the 2 existing duplicate coinbase pairs, not possible to create overwriting txs.  But by the
@@ -2095,7 +2098,7 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
     // future consensus change to do a new and improved version of BIP34 that
     // will actually prevent ever creating any duplicate coinbases in the
     // future.
-    static constexpr int BIP34_IMPLIES_BIP30_LIMIT = 1983702;
+    static constexpr int BIP34_IMPLIES_BIP30_LIMIT = std::numeric_limits<int>::max();
 
     // There is no potential to create a duplicate coinbase at block 209,921
     // because this is still before the BIP34 height and so explicit BIP30
@@ -2125,8 +2128,12 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
     // post BIP34 before approximately height 486,000,000 and presumably will
     // be reset before it reaches block 1,983,702 and starts doing unnecessary
     // BIP30 checking again.
-    assert(pindex->pprev);
-    CBlockIndex *pindexBIP34height = pindex->pprev->GetAncestor(chainparams.GetConsensus().BIP34Height);
+    CBlockIndex *pindexBIP34height = nullptr;
+    if (pindex->GetBlockHash() != chainparams.GetConsensus().hashGenesisBlock) {
+        assert(pindex->pprev);
+        pindexBIP34height = pindex->pprev->GetAncestor(chainparams.GetConsensus().BIP34Height);
+    } else
+        fEnforceBIP30 = false;
     //Only continue to enforce if we're below BIP34 activation height or the block hash at that height doesn't correspond.
     fEnforceBIP30 = fEnforceBIP30 && (!pindexBIP34height || !(pindexBIP34height->GetBlockHash() == chainparams.GetConsensus().BIP34Hash));
 
@@ -2304,7 +2311,7 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
     if (fJustCheck)
         return true;
 
-    if (!WriteUndoDataForBlock(blockundo, state, pindex, chainparams))
+    if (pindex->GetBlockHash() != chainparams.GetConsensus().hashGenesisBlock && !WriteUndoDataForBlock(blockundo, state, pindex, chainparams))
         return false;
 
     if (!pindex->IsValid(BLOCK_VALID_SCRIPTS)) {
@@ -3473,7 +3480,7 @@ static bool FindUndoPos(BlockValidationState &state, int nFile, FlatFilePos &pos
 static bool CheckBlockHeader(const CBlockHeader& block, BlockValidationState& state, const Consensus::Params& consensusParams, bool fCheckPOW = true)
 {
     // Check proof of work matches claimed amount
-    if (fCheckPOW && !CheckProofOfWork(block.GetHash(), block.nBits, consensusParams))
+    if (fCheckPOW && !CheckProofOfWork(block.GetPoWHash(), block.nBits, consensusParams))
         return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "high-hash", "proof of work failed");
 
     return true;
@@ -3695,9 +3702,45 @@ static bool ContextualCheckBlock(const CBlock& block, BlockValidationState& stat
                               ? pindexPrev->GetMedianTimePast()
                               : block.GetBlockTime();
 
-    // Check that all transactions are finalized
-    for (const auto& tx : block.vtx) {
-        if (!IsFinalTx(*tx, nHeight, nLockTimeCutoff)) {
+    // Check that all transactions are canonically ordered and finalized
+    const bool fEnforceCTOR = false;
+    const CTransaction *prevTx = nullptr;
+    for (const auto &ptx : block.vtx) {
+        const CTransaction &tx = *ptx;
+        if (fEnforceCTOR) {
+            if (prevTx) {
+                const uint256 &txWitHash = tx.GetWitnessHash(), &prevTxWitHash = prevTx->GetWitnessHash(), &prevTxHash = prevTx->GetHash();
+                if (tx.GetHash() == prevTxHash) {
+                    return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "tx-duplicate",
+                                     strprintf("Duplicated transaction %s",
+                                               prevTxHash.ToString()));
+                }
+
+                bool prevTxIsInput = false;
+                for (const CTxIn &vin : tx.vin) {
+                    if (vin.prevout.hash == prevTxHash) {
+                        prevTxIsInput = true;
+                        break;
+                    }
+                }
+                if (!prevTxIsInput && UintToArith256(txWitHash) < UintToArith256(prevTxWitHash)) {
+                    return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "tx-ordering",
+                        strprintf("Transaction order is invalid (%s < %s)",
+                                  txWitHash.ToString(),
+                                  prevTxWitHash.ToString()));
+                }
+                //if (prevTxIsInput)
+                    //LogPrintf("Transaction %s with witness hash %s is an input of transaction %s with witness hash %s\n", prevTxHash.ToString(), prevTxWitHash.ToString(), tx.GetHash().ToString(), txWitHash.ToString());
+                //else
+                    //LogPrintf("Transaction %s has witness hash %s which is greater than transaction %s with witness hash %s\n", tx.GetHash().ToString(), txWitHash.ToString(), prevTxHash.ToString(), prevTxWitHash.ToString());
+            }
+
+            if (prevTx || (!tx.IsCoinBase() && !tx.IsCoinStake())) {
+                prevTx = &tx;
+            }
+        }
+
+        if (!IsFinalTx(tx, nHeight, nLockTimeCutoff)) {
             return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-txns-nonfinal", "non-final transaction");
         }
     }
@@ -3797,8 +3840,11 @@ bool BlockManager::AcceptBlockHeader(const CBlockHeader& block, BlockValidationS
             LogPrintf("ERROR: %s: prev block invalid\n", __func__);
             return state.Invalid(BlockValidationResult::BLOCK_INVALID_PREV, "bad-prevblk");
         }
-        if (!ContextualCheckBlockHeader(block, state, chainparams, pindexPrev, GetAdjustedTime()))
-            return error("%s: Consensus::ContextualCheckBlockHeader: %s, %s", __func__, hash.ToString(), state.ToString());
+        if (!ContextualCheckBlockHeader(block, state, chainparams, pindexPrev, GetAdjustedTime())) {
+            LogPrint(BCLog::VALIDATION, "%s: Consensus::ContextualCheckBlockHeader: %s, %s\n", __func__, hash.ToString(), state.ToString());
+            return false;
+            //return error("%s: Consensus::ContextualCheckBlockHeader: %s, %s", __func__, hash.ToString(), state.ToString());
+        }
 
         /* Determine if this block descends from any block which has been found
          * invalid (m_failed_blocks), then mark pindexPrev and any blocks between

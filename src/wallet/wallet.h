@@ -551,6 +551,13 @@ public:
     const uint256& GetHash() const { return tx->GetHash(); }
     bool IsCoinBase() const { return tx->IsCoinBase(); }
     bool IsImmatureCoinBase() const;
+    bool IsCoinStake() const { return tx->IsCoinStake(); }
+
+    // Disable copying of CWalletTx objects to prevent bugs where instances get
+    // copied in and out of the mapWallet map, and fields are updated in the
+    // wrong copy.
+    //CWalletTx(CWalletTx const &) = delete;
+    //void operator=(CWalletTx const &x) = delete;
 };
 
 class COutput
@@ -1232,6 +1239,9 @@ public:
  * their transactions. Actual rebroadcast schedule is managed by the wallets themselves.
  */
 void MaybeResendWalletTxs();
+
+// Called periodically to ensure that no unspendable orphaned coinstakes remain in any wallets
+void AbandonOrphanedCoinStakes();
 
 /** RAII object to check and reserve a wallet rescan */
 class WalletRescanReserver

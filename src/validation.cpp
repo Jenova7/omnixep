@@ -1175,8 +1175,8 @@ bool ReadBlockFromDisk(CBlock& block, const FlatFilePos& pos, const Consensus::P
     }
 
     // Check the header
-    if (block.IsProofOfWork() && !CheckProofOfWork(block.GetPoWHash(), block.nBits, consensusParams))
-        return error("ReadBlockFromDisk: Errors in block header at %s", pos.ToString());
+    const int algo = CBlockHeader::GetAlgoType(block.nVersion);
+    if (block.IsProofOfWork() && !CheckProofOfWork(block.GetPoWHash(), block.nBits, algo, consensusParams)) return error("ReadBlockFromDisk: Errors in block header at %s", pos.ToString());
 
     return true;
 }
@@ -1247,16 +1247,22 @@ CAmount GetBlockSubsidy(int nHeight, bool fProofOfStake, uint64_t nCoinAge, cons
 {
     if (nHeight < 0) return 0;
 
-    const CAmount nMoneySupply = (nHeight > 0 && ::ChainActive().Tip()) ? (::ChainActive()[nHeight-1] ? ::ChainActive()[nHeight-1]->nMoneySupply : ::ChainActive().Tip()->nMoneySupply) : 0; // the previous block's money supply should probably be passed to this function instead of retrieving it here
+    CAmount nSubsidy = 0;
+    CAmount nRewardCoinYear = COIN / 100;                                                                                                                                                        // this is 1% APR interest by default (compounded once per stake); for every 100 coins held for a year, the reward when staked should be 1 coin (rewards increase proportionally with larger money supply/more coins staking)
+    const CAmount nMoneySupply = (nHeight > 0 && ::ChainActive().Tip()) ? (::ChainActive()[nHeight - 1] ? ::ChainActive()[nHeight - 1]->nMoneySupply : ::ChainActive().Tip()->nMoneySupply) : 0; // the previous block's money supply should probably be passed to this function instead of retrieving it here
 
-    int halvings = nHeight / consensusParams.nSubsidyHalvingInterval;
-    // Force block reward to zero when right shift is undefined.
-    if (halvings >= 64)
-        return 0;
+    if (fProofOfStake) {
+        nRewardCoinYear *= 3; // 3% interest (effective rate with continuous compounding is exp(0.03) - 1 = 3.045%)
 
-    CAmount nSubsidy = 50 * COIN;
-    // Subsidy is cut in half every 210,000 blocks which will occur approximately every 4 years.
-    nSubsidy >>= halvings;
+        nSubsidy = nCoinAge * nRewardCoinYear * 33 / (365 * 33 + 8); // this is a more accurate approximation of the number of days in a year than 365.25, being equivalent to dividing by (365 + 8.0/33) or 365.24242424... (keep in mind the integer division)
+    } else {
+        if (nHeight == 0)                  // premine
+            nSubsidy = 30000000000 * COIN; // 30 billion
+        else if (Params().NetworkIDString() != CBaseChainParams::MAIN)
+            nSubsidy = 1000 * COIN;
+        else
+            nSubsidy = 1 * COIN;
+    }
 
     if ((unsigned)nHeight >= consensusParams.nMinerConfirmationWindow) {
         if (nMoneySupply + nSubsidy > MAX_MONEY) // soft supply cap (this will essentially put us into static PoW/PoS rewards)
@@ -1292,7 +1298,7 @@ CAmount GetTreasuryPayment(int nHeight, const Consensus::Params& consensusParams
         for (int i = startHeight; i < nHeight; i++) {
             const CBlockIndex* const pindex = ::ChainActive()[i];
             if (!IsTreasuryBlock(i, consensusParams)) // make sure previous treasury rewards aren't counted
-                blockValue += pindex->nMint; // add up coins from previous nTreasuryPaymentsCycleBlocks blocks
+                blockValue += pindex->nMint;          // add up coins from previous nTreasuryPaymentsCycleBlocks blocks
             else {
                 /*uint64_t nCoinAge = 0;
                 if (pindex->IsProofOfStake()) {
@@ -1792,11 +1798,15 @@ DisconnectResult CChainState::DisconnectBlock(const CBlock& block, const CBlockI
         // Check that all outputs are available and match the outputs in the block itself
         // exactly.
         for (size_t o = 0; o < tx.vout.size(); o++) {
-            if (!tx.vout[o].scriptPubKey.IsUnspendable()) {
+            if (!tx.vout[o].scriptPubKey.IsUnspendable() && tx.vout[o].nValue != 0 && !tx.vout[o].scriptPubKey.empty()) {
                 COutPoint out(hash, o);
                 Coin coin;
                 bool is_spent = view.SpendCoin(out, &coin);
                 if (!is_spent || tx.vout[o] != coin.out || pindex->nHeight != coin.nHeight || is_coinbase != coin.fCoinBase || is_coinstake != coin.fCoinStake) {
+                    // Don't mark as unclean if this output is from an empty, unspendable coinbase transaction that has been duplicated (SpendCoin does move and invalidate its Coin object, but we shouldn't be disconnecting any blocks from prior to nMandatoryUpgradeBlock)
+                    //if (!is_spent || coin.out != CTxOut() || coin.nHeight != 0 || coin.fCoinBase || coin.fCoinStake || tx.vout[o] != CTxOut(0, CScript()) || !is_coinbase)
+                        //fClean = false; // transaction output mismatch
+
                     fClean = false; // transaction output mismatch
                 }
             }
@@ -2075,6 +2085,32 @@ static inline bool ContextualCheckPoSBlock(const CBlock& block, const bool& fPro
     if (fJustCheck)
         return true;
 
+
+    // write everything to index
+    if (!pindex->SetStakeEntropyBit(nEntropyBit))
+        return error("ConnectBlock(): SetStakeEntropyBit() failed");
+    pindex->SetStakeModifier(nStakeModifier, fGeneratedStakeModifier);
+    //pindex->SetStakeModifierV2(nStakeModifierV2, fGeneratedStakeModifier);
+    if (fProofOfStake) {
+        pindex->hashProofOfStake = hashProofOfStake;
+    }
+    pindex->nStakeModifierChecksum = nStakeModifierChecksum;
+    setDirtyBlockIndex.insert(pindex);  // queue a write to disk
+
+    return true;
+}
+
+static inline CAmount GetValueIn(const CTransaction& tx, const CCoinsViewCache& view)
+{
+    if (tx.IsCoinBase())
+        return 0;
+
+    CAmount nResult = 0;
+    for (unsigned int i = 0; i < tx.vin.size(); i++)
+        nResult += view.AccessCoin(tx.vin[i].prevout).out.nValue;
+
+    return nResult;
+}
 
     // write everything to index
     if (!pindex->SetStakeEntropyBit(nEntropyBit))
@@ -2392,7 +2428,7 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
         }
         nValueOut += tx.GetValueOut();
         for (const CTxOut& tx_out : tx.vout) {
-            if (tx_out.scriptPubKey.IsUnspendable())
+            if (tx_out.scriptPubKey.IsUnspendable() || tx_out.scriptPubKey.empty())
                 nAmountBurned += tx_out.nValue;
         }
 
@@ -2484,7 +2520,8 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
     }
 
     //LogPrintf("ConnectBlock(): INFO: Block reward (actual=%s vs limit=%s) maximum: %s\n", FormatMoney(nActualBlockReward), FormatMoney(nExpectedBlockReward), nActualBlockReward == nExpectedBlockReward);
-    if (nActualBlockReward > nExpectedBlockReward) {
+    //if (nActualBlockReward > nExpectedBlockReward) {
+    if (pindex->nHeight != 0 && nActualBlockReward > nExpectedBlockReward){
         LogPrintf("ERROR: ConnectBlock(): %s pays too much (actual=%s vs limit=%s)\n", fProofOfStake ? "coinstake" : "coinbase", FormatMoney(nActualBlockReward), FormatMoney(nExpectedBlockReward));
         return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-cb-amount");
     }
@@ -3548,8 +3585,16 @@ CBlockIndex* BlockManager::AddToBlockIndex(const CBlockHeader& block)
         pindexNew->BuildSkip();
     }
     pindexNew->nTimeMax = (pindexNew->pprev ? std::max(pindexNew->pprev->nTimeMax, pindexNew->nTime) : pindexNew->nTime);
-    if (block.IsProofOfStake())
+    if (block.IsProofOfStake()) {
         pindexNew->SetProofOfStake();
+        if (pindexNew->pprev) { // Increase the count of PoS blocks in the chain
+            pindexNew->nHeightPoW = pindexNew->pprev->nHeightPoW;
+            pindexNew->nHeightPoS = pindexNew->pprev->nHeightPoS + 1;
+        }
+    } else if (pindexNew->pprev) { // Increase the count of PoW blocks in the chain
+        pindexNew->nHeightPoW = pindexNew->pprev->nHeightPoW + 1;
+        pindexNew->nHeightPoS = pindexNew->pprev->nHeightPoS;
+    }
     if (IsTreasuryBlock(pindexNew->nHeight, Params().GetConsensus()))
         pindexNew->SetTreasuryBlock();
     pindexNew->nChainWork = (pindexNew->pprev ? pindexNew->pprev->nChainWork : 0) + GetBlockProof(*pindexNew);
@@ -3687,8 +3732,7 @@ static bool CheckBlockHeader(const CBlockHeader& block, BlockValidationState& st
         return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "invalid-type", "block type is invalid");
 
     // Check proof of work matches claimed amount
-    if (block.IsProofOfWork() && fCheckPOW && !CheckProofOfWork(block.GetPoWHash(), block.nBits, consensusParams))
-        return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "high-hash", "proof of work failed");
+    if (block.IsProofOfWork() && fCheckPOW && !CheckProofOfWork(block.GetPoWHash(), block.nBits, algo, consensusParams)) return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "high-hash", "proof of work failed");
 
     return true;
 }
@@ -3881,11 +3925,21 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block, BlockValidatio
 {
     assert(pindexPrev != nullptr);
     const int nHeight = pindexPrev->nHeight + 1;
+    const int chainHeight = ::ChainActive().Height();
+
+    // If this is a reorg and we have been synced for at least an hour, check that it is not too deep
+    const int nMaxReorgDepth = gArgs.GetArg("-maxreorgdepth", DEFAULT_MAX_REORG_DEPTH);
+    static int64_t nReorgCheckTime = GetTime() + 60 * 60;
+    static bool fCheckReorgDepth = false;
+    if (!fCheckReorgDepth && GetTime() >= nReorgCheckTime)
+        fCheckReorgDepth = true;
+    if (nMaxReorgDepth >= 0 && fCheckReorgDepth && chainHeight - nHeight >= nMaxReorgDepth)
+        return state.Invalid(BlockValidationResult::BLOCK_CHECKPOINT, "bad-fork-prior-to-max-reorg-depth", strprintf("%s: forked chain older than max reorganization depth (height %d, depth %d)", __func__, nHeight, chainHeight - nHeight));
 
     // Check proof of work
     const Consensus::Params& consensusParams = params.GetConsensus();
     const uint32_t nRequiredBits = GetNextWorkRequired(pindexPrev, &block, consensusParams);
-    //LogPrintf("%s: block %i - bnTarget = %s, expected bnTarget = %s\n", __func__, nHeight, arith_uint256().SetCompact(block.nBits).ToString(), arith_uint256().SetCompact(nRequiredBits).ToString());
+    //LogPrintf("%s: block %i - bnTarget = %s, expected bnTarget = %s\n", __func__, nHeight, arith_uint256().SetCompactBase256(block.nBits).ToString(), arith_uint256().SetCompactBase256(nRequiredBits).ToString());
     if (block.nBits != nRequiredBits)
         return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "bad-diffbits", "incorrect difficulty target");
 

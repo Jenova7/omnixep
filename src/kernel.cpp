@@ -19,9 +19,18 @@
 
 // Hard checkpoints of stake modifiers to ensure they are deterministic
 static const std::map<int, unsigned int> mapStakeModifierCheckpoints = {
+    {0, 0x0e00670bu},
+    {50000, 0xcbe5a9b4u},
+    {100000, 0xbd074053u},
+    {150000, 0x16a0c9d6u},
+    {200000, 0x80eb9859u},
+    {250000, 0x2c20452eu},
+    {300000, 0x9bb2d8e3u},
+    {350000, 0x4d95e3f4u},
 };
 
 static const std::map<int, unsigned int> mapStakeModifierTestnetCheckpoints = {
+    {0, 0x0e00670bu},
 };
 
 // Get the last stake modifier and its generation time from a given block
@@ -501,10 +510,10 @@ bool CheckStakeKernelHash(const unsigned int& nBits, const CBlockIndex* pindexPr
     bool fNegative;
     bool fOverflow;
     arith_uint256 bnTargetPerCoinDay;
-    bnTargetPerCoinDay.SetCompact(nBits, &fNegative, &fOverflow);
+    bnTargetPerCoinDay.SetCompactBase256(nBits, &fNegative, &fOverflow);
 
     // Check range
-    if (fNegative || bnTargetPerCoinDay == 0 || fOverflow || bnTargetPerCoinDay > UintToArith256(params.powLimit))
+    if (fNegative || bnTargetPerCoinDay == 0 || fOverflow || bnTargetPerCoinDay > UintToArith256(params.powLimit[CBlockHeader::ALGO_POS]))
         return false;
 
     // v0.3 protocol kernel hash weight starts from 0 at the min age

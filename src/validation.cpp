@@ -2112,32 +2112,6 @@ static inline CAmount GetValueIn(const CTransaction& tx, const CCoinsViewCache& 
     return nResult;
 }
 
-    // write everything to index
-    if (!pindex->SetStakeEntropyBit(nEntropyBit))
-        return error("ConnectBlock(): SetStakeEntropyBit() failed");
-    pindex->SetStakeModifier(nStakeModifier, fGeneratedStakeModifier);
-    //pindex->SetStakeModifierV2(nStakeModifierV2, fGeneratedStakeModifier);
-    if (fProofOfStake) {
-        pindex->hashProofOfStake = hashProofOfStake;
-    }
-    pindex->nStakeModifierChecksum = nStakeModifierChecksum;
-    setDirtyBlockIndex.insert(pindex);  // queue a write to disk
-
-    return true;
-}
-
-static inline CAmount GetValueIn(const CTransaction& tx, const CCoinsViewCache& view)
-{
-    if (tx.IsCoinBase())
-        return 0;
-
-    CAmount nResult = 0;
-    for (unsigned int i = 0; i < tx.vin.size(); i++)
-        nResult += view.AccessCoin(tx.vin[i].prevout).out.nValue;
-
-    return nResult;
-}
-
 static int64_t nTimeCheck = 0;
 static int64_t nTimeForks = 0;
 static int64_t nTimeVerify = 0;
